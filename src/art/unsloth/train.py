@@ -11,8 +11,8 @@ from peft.peft_model import PeftModel
 from trl import GRPOTrainer
 
 from .. import dev
+from ..loss import loss_fn, shift_tensor
 from ..types import TrainConfig
-from ..utils.group_aggregate import group_aggregate
 
 if TYPE_CHECKING:
     from .service import TrainInputs
@@ -156,81 +156,21 @@ def get_compute_loss_fn(trainer: "GRPOTrainer") -> Callable[..., torch.Tensor]:
             ref_logprobs = None
         del attn_bias
 
-        # Shift inputs for loss calculation
-        old_logprobs = shift_tensor(inputs["logprobs"], 0.0)
-        advantages = shift_tensor(inputs["advantages"], 0.0)
-        assistant_mask = shift_tensor(inputs["assistant_mask"], False).to(
-            new_logprobs.dtype
-        )
-        weights = shift_tensor(inputs["weights"], 0.0)
-        # Assume missing old logprobs were sampled under the current policy
-        old_logprobs = torch.where(
-            torch.isnan(old_logprobs),
-            new_logprobs.detach(),
-            old_logprobs,
-        )
-        logprob_diff = new_logprobs - old_logprobs
-        if _config.get("importance_sampling_level", "token") == "sequence":
-            prob_ratio = torch.exp(
-                group_aggregate(
-                    logprob_diff,
-                    by=shift_tensor(inputs["group_ids"], 0) * assistant_mask,
-                    reduce="mean",
-                )
-            )
-        else:
-            prob_ratio = torch.exp(logprob_diff)
-        epsilon = _config.get("epsilon", 0.2)
-        epsilon_high = _config.get("epsilon_high", epsilon)
-        if epsilon_high is None:
-            epsilon_high = epsilon
-        if max_negative_advantage_importance_sampling_weight := _config.get(
-            "max_negative_advantage_importance_sampling_weight", None
-        ):
-            prob_ratio = torch.clamp(
-                prob_ratio, max=max_negative_advantage_importance_sampling_weight
-            )
-        policy_loss = -torch.min(
-            prob_ratio * advantages,
-            torch.clip(prob_ratio, 1 - epsilon, 1 + epsilon_high) * advantages,
-        )
-        if upper_bound := _config.get("truncated_importance_sampling", None):
-            if "original_logprobs" in inputs:
-                original_logprobs = shift_tensor(inputs["original_logprobs"], 0.0)
-                original_logprobs = torch.where(
-                    torch.isnan(original_logprobs),
-                    new_logprobs.detach(),
-                    original_logprobs,
-                )
-                logprob_diff = old_logprobs - original_logprobs
-                prob_ratio = torch.exp(logprob_diff)
-            policy_loss *= torch.clamp(prob_ratio, max=upper_bound).detach()
-        if ref_logprobs is not None:
-            kl_div = (
-                torch.exp(ref_logprobs - new_logprobs)
-                - (ref_logprobs - new_logprobs)
-                - 1.0
-            )
-        else:
-            kl_div = torch.zeros_like(policy_loss)
-
-        policy_loss = policy_loss * weights * assistant_mask
-        kl_div = kl_div * weights * assistant_mask
-        mean_policy_loss = policy_loss.sum() / (assistant_mask.sum() + 1e-6)
-        mean_kl = kl_div.sum() / (assistant_mask.sum() + 1e-6)
-
-        # Compute mean entropy for the current step
-        shifted_entropies = shift_tensor(entropies, 0.0)
-        mean_entropy = (shifted_entropies * weights * assistant_mask).sum() / (
-            assistant_mask.sum() + 1e-6
+        loss = loss_fn(
+            inputs,
+            new_logprobs,
+            ref_logprobs,
+            entropies,
+            _config,
         )
 
         trainer._metrics["train"]["learning_rate"].append(config.learning_rate)
-        trainer._metrics["train"]["policy_loss"].append(mean_policy_loss.item())
-        trainer._metrics["train"]["entropy"].append(mean_entropy.item())  # type: ignore
+        trainer._metrics["train"]["policy_loss"].append(loss.mean_policy_loss.item())
+        if loss.mean_entropy is not None:
+            trainer._metrics["train"]["entropy"].append(loss.mean_entropy.item())  # type: ignore
         if config.beta > 0.0:
-            trainer._metrics["train"]["kl_div"].append(mean_kl.item())
-        return mean_policy_loss + config.beta * mean_kl
+            trainer._metrics["train"]["kl_div"].append(loss.mean_kl.item())
+        return loss.mean_policy_loss + config.beta * loss.mean_kl  # type: ignore
 
     return compute_loss
 
@@ -393,10 +333,6 @@ def _calculate_logprobs(
         )
     del hidden_states
     return log_probs, entropy
-
-
-def shift_tensor(tensor: torch.Tensor, pad: int | float | bool) -> torch.Tensor:
-    return torch.nn.functional.pad(tensor[:, 1:], (0, 1), value=pad)
 
 
 def gc_and_empty_cuda_cache(n: int = 3) -> None:

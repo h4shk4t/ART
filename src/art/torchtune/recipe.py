@@ -707,7 +707,7 @@ class FullFinetuneRecipeDistributed(FTRecipeInterface):
         import torch
         from torch.nn.attention.flex_attention import BlockMask, create_block_mask
 
-        from ..unsloth.train import shift_tensor
+        from ..loss import shift_tensor
 
         def make_block_mask(
             group_ids: torch.Tensor,  # [B, S]  int32/64
