@@ -36,10 +36,12 @@ class TinkerBackend(LocalBackend):
                 config=model._internal_config,
             )
             config["tinker_args"] = config.get("tinker_args") or TinkerArgs(
-                renderer_name=get_renderer_name(model.base_model),
-                training_client_args=TinkerTrainingClientArgs(
-                    rank=8,
-                ),
+                renderer_name=get_renderer_name(model.base_model)
+            )
+            config["tinker_args"]["training_client_args"] = config["tinker_args"].get(
+                "training_client_args"
+            ) or TinkerTrainingClientArgs(
+                rank=8,
             )
             self._services[model.name] = TinkerService(
                 model_name=model.name,
