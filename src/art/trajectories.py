@@ -31,6 +31,19 @@ class History(pydantic.BaseModel):
     messages_and_choices: MessagesAndChoices
     tools: Tools | None = None
 
+    @pydantic.field_validator("messages_and_choices", mode="before")
+    @classmethod
+    def deserialize_choices(cls, v: list[Any]) -> list[Any]:
+        """Convert serialized Choice dicts back to Choice objects."""
+        result = []
+        for item in v:
+            if isinstance(item, dict) and "message" in item and "index" in item:
+                # This is a serialized Choice dict - convert back to Choice object
+                result.append(Choice.model_validate(item))
+            else:
+                result.append(item)
+        return result
+
     def messages(self) -> Messages:
         return get_messages(self.messages_and_choices)
 
@@ -45,6 +58,19 @@ class Trajectory(pydantic.BaseModel):
     metadata: dict[str, MetadataValue] = {}
     logs: list[str] = []
     start_time: datetime = pydantic.Field(default_factory=datetime.now, exclude=True)
+
+    @pydantic.field_validator("messages_and_choices", mode="before")
+    @classmethod
+    def deserialize_choices(cls, v: list[Any]) -> list[Any]:
+        """Convert serialized Choice dicts back to Choice objects."""
+        result = []
+        for item in v:
+            if isinstance(item, dict) and "message" in item and "index" in item:
+                # This is a serialized Choice dict - convert back to Choice object
+                result.append(Choice.model_validate(item))
+            else:
+                result.append(item)
+        return result
 
     def __init__(self, **data: Any):
         super().__init__(**data)
@@ -97,6 +123,7 @@ def get_messages(messages_and_choices: MessagesAndChoices) -> Messages:
     messages: Messages = []
     for message_or_choice in messages_and_choices:
         if isinstance(message_or_choice, Choice):
+            # Choice object (always a Choice after Pydantic validation)
             content = message_or_choice.message.content or ""
             tool_calls = message_or_choice.message.tool_calls or []
             messages.append(
@@ -116,7 +143,7 @@ def get_messages(messages_and_choices: MessagesAndChoices) -> Messages:
                 }
             )
         else:
-            # Ensure content is always a string for tokenizer chat templates
+            # Regular Message dict
             msg = dict(message_or_choice)
             if msg.get("content") is None:
                 msg["content"] = ""

@@ -72,11 +72,11 @@ def get_compute_loss_fn(trainer: "GRPOTrainer") -> Callable[..., torch.Tensor]:
         if inputs.get("pixel_values") and inputs["pixel_values"][0] is not None:
             inputs["pixel_values"] = inputs["pixel_values"][0]  # type: ignore
         else:
-            del inputs["pixel_values"]  # type: ignore
+            inputs.pop("pixel_values", None)
         if inputs.get("image_grid_thw") and inputs["image_grid_thw"][0] is not None:
             inputs["image_grid_thw"] = inputs["image_grid_thw"][0]  # type: ignore
         else:
-            del inputs["image_grid_thw"]  # type: ignore
+            inputs.pop("image_grid_thw", None)
 
         # Move tensors to the correct device
         inputs = {
