@@ -5,27 +5,13 @@ from functools import cached_property, partial
 import os
 from pathlib import Path
 import shutil
-import socket
 import time
 from typing import AsyncIterator, Generator
-import uuid
 
-from fastapi import FastAPI, Request
-from openai import AsyncOpenAI
-from openai.types.chat.chat_completion import ChatCompletion, Choice, ChoiceLogprobs
-from openai.types.chat.chat_completion_message import ChatCompletionMessage
-from openai.types.chat.chat_completion_message_function_tool_call import (
-    ChatCompletionMessageFunctionToolCall,
-    Function,
-)
-from openai.types.chat.chat_completion_token_logprob import ChatCompletionTokenLogprob
-from openai.types.chat.completion_create_params import CompletionCreateParams
-from openai.types.completion_usage import CompletionUsage
 import tinker
 from tinker.lib.public_interfaces.rest_client import RestClient as TinkerRestClient
 from tinker_cookbook import renderers, tokenizer_utils
 import torch
-import uvicorn
 import yaml
 
 from .. import dev, types
@@ -35,18 +21,7 @@ from ..preprocessing.pack import (
     DiskPackedTensors,
     packed_tensors_from_dir,
 )
-
-# Patch Tinker's Qwen3InstructRenderer which mistakenly expects "args" instead of "arguments" in tool calls.
-_parse_tool_call = renderers.Qwen3InstructRenderer._parse_tool_call
-
-
-def _patched_parse_tool_call(
-    self, tool_call_str: str
-) -> list[renderers.ToolCall] | None:
-    return _parse_tool_call(self, tool_call_str.replace('"arguments": ', '"args": '))
-
-
-renderers.Qwen3InstructRenderer._parse_tool_call = _patched_parse_tool_call
+from .server import OpenAICompatibleTinkerServer
 
 
 @contextmanager
@@ -64,32 +39,19 @@ class TinkerService:
     base_model: str
     config: dev.InternalModelConfig
     output_dir: str
-    _openai_server_task: asyncio.Task[None] | None = None
+    _server: OpenAICompatibleTinkerServer | None = None
 
-    async def start_openai_server(self, config: dev.OpenAIServerConfig | None) -> None:
-        self._openai_server_task = asyncio.create_task(
-            self._run_openai_server(config, await self._state_task)
+    async def start_openai_server(
+        self, config: dev.OpenAIServerConfig | None
+    ) -> tuple[str, int]:
+        state = await self._state_task
+        self._server = OpenAICompatibleTinkerServer(
+            host=config.get("host") if config else None,
+            port=config.get("port") if config else None,
+            sampling_clients_and_renderers=state.sampling_clients_and_renderers,
         )
-        client = AsyncOpenAI(
-            base_url=f"http://{(config or {}).get('host', '0.0.0.0')}:{(config or {}).get('port', 8000)}/v1"
-        )
-        with log_timing("Waiting for server"):
-            start = time.time()
-            while True:
-                timeout = float(os.environ.get("ART_SERVER_TIMEOUT", 300.0))
-                if time.time() - start > timeout:
-                    raise TimeoutError(
-                        f"Unable to reach OpenAI-compatible server within {timeout} seconds. You can increase this timeout by setting the ART_SERVER_TIMEOUT environment variable."
-                    )
-                try:
-                    await client.chat.completions.create(
-                        model=self.model_name,
-                        messages=[{"role": "user", "content": "Hello, world!"}],
-                        max_completion_tokens=1,
-                    )
-                    break  # Server is ready
-                except:  # noqa: E722
-                    await asyncio.sleep(0.1)
+        with log_timing("Starting OpenAI-compatible Tinker server"):
+            return await self._server.start()
 
     async def vllm_engine_is_sleeping(self) -> bool:
         return False
@@ -176,13 +138,18 @@ class TinkerService:
         last_checkpoint_dir = self._get_last_checkpoint_dir()
         assert last_checkpoint_dir is not None, "No checkpoint found"
         next_step = int(last_checkpoint_dir.name) + 1
-        new_sampler_client = await self._save_checkpoint(
+        new_sampling_client = await self._save_checkpoint(
             last_checkpoint_dir.with_name(f"{next_step:04d}"),
             state.training_client,
         )
-        # Add new sampler client to the dict and update latest step
-        state.sampler_clients[next_step] = new_sampler_client
-        state.latest_step = next_step
+        state.sampling_clients_and_renderers[self.model_name] = (
+            new_sampling_client,
+            state.renderer,
+        )
+        state.sampling_clients_and_renderers[f"{self.model_name}@{next_step}"] = (
+            new_sampling_client,
+            state.renderer,
+        )
 
     async def delete_checkpoints(self, steps_to_keep: list[int]) -> None:
         state = await self._state_task
@@ -203,8 +170,8 @@ class TinkerService:
         )
         # Also remove corresponding sampler clients from state
         for step in steps_to_delete:
-            if step in state.sampler_clients:
-                del state.sampler_clients[step]
+            if f"{self.model_name}@{step}" in state.sampling_clients_and_renderers:
+                del state.sampling_clients_and_renderers[f"{self.model_name}@{step}"]
                 print(f"Removed sampler client for step {step}")
 
     @cached_property
@@ -226,7 +193,7 @@ class TinkerService:
                     user_metadata=config.get("user_metadata", None),
                 )
             with log_timing("Creating Tinker sampling client from checkpoint"):
-                sampler_client = await training_client.create_sampling_client_async(
+                sampling_client = await training_client.create_sampling_client_async(
                     model_path=info["sampler_weights_path"],
                 )
         else:
@@ -243,19 +210,22 @@ class TinkerService:
                         **training_client_args,
                     )
                 )
-            sampler_client = await self._save_checkpoint(
+            sampling_client = await self._save_checkpoint(
                 self._checkpoints_path / "0000", training_client
             )
+        renderer = renderers.get_renderer(
+            name=config["renderer_name"],
+            tokenizer=tokenizer_utils.get_tokenizer(self.base_model),
+        )
         return TinkerState(
             service_client=service_client,
             rest_client=rest_client,
             training_client=training_client,
-            sampler_clients={current_step: sampler_client},
-            latest_step=current_step,
-            renderer=renderers.get_renderer(
-                name=config["renderer_name"],
-                tokenizer=tokenizer_utils.get_tokenizer(self.base_model),
-            ),
+            sampling_clients_and_renderers={
+                self.model_name: (sampling_client, renderer),
+                f"{self.model_name}@{current_step}": (sampling_client, renderer),
+            },
+            renderer=renderer,
         )
 
     @property
@@ -296,122 +266,6 @@ class TinkerService:
             )
         return sampling_client
 
-    async def _run_openai_server(
-        self, config: dev.OpenAIServerConfig | None, state: "TinkerState"
-    ) -> None:
-        config = config or {}
-        app = FastAPI()
-
-        @app.get("/metrics")
-        async def metrics() -> str:
-            # Minimal Prometheus-style metrics to satisfy the health monitor
-            return "# Tinker service metrics\n"
-
-        @app.post("/v1/completions")
-        async def completions() -> dict:
-            # Minimal completions endpoint for health checks
-            return {"choices": [{"text": ""}]}
-
-        @app.post("/v1/chat/completions")
-        async def chat_completions(
-            request: Request, body: CompletionCreateParams
-        ) -> ChatCompletion:
-            # Parse model name to extract optional @step suffix
-            model_name = body.get("model", self.model_name)
-            step: int | None = None
-            if "@" in str(model_name):
-                base_name, step_str = str(model_name).rsplit("@", 1)
-                step = int(step_str)
-
-            sampler_client = state.get_sampler_client(step)
-
-            prompt = tinker.ModelInput.from_ints(
-                tokens=state.renderer.tokenizer.apply_chat_template(
-                    list(body["messages"]),  # type: ignore
-                    tools=body.get("tools"),  # type: ignore
-                    add_generation_prompt=True,
-                )
-            )
-            sample_response = await sampler_client.sample_async(
-                prompt=prompt,
-                num_samples=body.get("n") or 1,
-                sampling_params=tinker.SamplingParams(
-                    max_tokens=body.get("max_completion_tokens")
-                    or body.get("max_tokens"),
-                    seed=body.get("seed"),
-                    temperature=t
-                    if (t := body.get("temperature")) is not None
-                    else 1.0,
-                    top_k=body.get("top_k") or -1,
-                    top_p=body.get("top_p") or 1.0,
-                ),
-            )
-            choices: list[Choice] = []
-            for i, sequence in enumerate(sample_response.sequences):
-                assert sequence.logprobs is not None, "Logprobs are required"
-                assert len(sequence.tokens) == len(sequence.logprobs), (
-                    "Tokens and logprobs must have the same length"
-                )
-                message, _ = state.renderer.parse_response(sequence.tokens)
-                choices.append(
-                    Choice(
-                        finish_reason=sequence.stop_reason,
-                        index=i,
-                        message=ChatCompletionMessage(
-                            content=message["content"],
-                            role="assistant",
-                            tool_calls=[
-                                ChatCompletionMessageFunctionToolCall(
-                                    type="function",
-                                    id=tool_call.id or "",
-                                    function=Function(
-                                        name=tool_call.function.name,
-                                        arguments=tool_call.function.arguments,
-                                    ),
-                                )
-                                for tool_call in message.get("tool_calls", [])
-                            ]
-                            or None,
-                        ),
-                        logprobs=ChoiceLogprobs(
-                            content=[
-                                ChatCompletionTokenLogprob(
-                                    token=f"token_id:{token}",
-                                    logprob=logprob,
-                                    top_logprobs=[],
-                                )
-                                for token, logprob in zip(
-                                    sequence.tokens, sequence.logprobs
-                                )
-                            ]
-                        ),
-                    )
-                )
-            completion_tokens = sum(
-                len(sequence.tokens) for sequence in sample_response.sequences
-            )
-            return ChatCompletion(
-                id=str(uuid.uuid4()),
-                choices=choices,
-                created=int(time.time()),
-                model=self.model_name,
-                object="chat.completion",
-                usage=CompletionUsage(
-                    completion_tokens=completion_tokens,
-                    prompt_tokens=prompt.length,
-                    total_tokens=completion_tokens + prompt.length,
-                ),
-            )
-
-        server_config = uvicorn.Config(
-            app,
-            host=config.get("host", "0.0.0.0"),
-            port=config.get("port", get_free_port()),
-            log_level="error",
-        )
-        server = uvicorn.Server(server_config)
-        await server.serve()
-
 
 async def delete_checkpoint(
     checkpoint_dir: Path, rest_client: TinkerRestClient
@@ -429,35 +283,12 @@ async def delete_checkpoint(
     print(f"Deleted checkpoint {checkpoint_dir.name}")
 
 
-def get_free_port() -> int:
-    """
-    Returns the first free port >= 8000.
-    """
-    port = 8000
-    while True:
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            try:
-                s.bind(("", port))
-                return port
-            except OSError:
-                port += 1
-
-
 @dataclass
 class TinkerState:
     service_client: tinker.ServiceClient
     rest_client: TinkerRestClient
     training_client: tinker.TrainingClient
-    sampler_clients: dict[int, tinker.SamplingClient]
-    latest_step: int
+    sampling_clients_and_renderers: dict[
+        str, tuple[tinker.SamplingClient, renderers.Renderer]
+    ]
     renderer: renderers.Renderer
-
-    def get_sampler_client(self, step: int | None = None) -> tinker.SamplingClient:
-        if step is None:
-            step = self.latest_step
-        if step not in self.sampler_clients:
-            available = sorted(self.sampler_clients.keys())
-            raise ValueError(
-                f"No sampler client for step {step}. Available steps: {available}"
-            )
-        return self.sampler_clients[step]

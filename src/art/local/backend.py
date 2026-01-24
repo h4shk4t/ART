@@ -267,11 +267,12 @@ class LocalBackend(Backend):
         config: dev.OpenAIServerConfig | None = None,
     ) -> tuple[str, str]:
         service = await self._get_service(model)
-        await service.start_openai_server(config=config)
-        server_args = (config or {}).get("server_args", {})
+        host, port = await service.start_openai_server(config=config)
 
-        base_url = f"http://{server_args.get('host', '0.0.0.0')}:{server_args.get('port', 8000)}/v1"
-        api_key = server_args.get("api_key", None) or "default"
+        base_url = f"http://{host}:{port}/v1"
+        api_key = (config or {}).get("server_args", {}).get(
+            "api_key", None
+        ) or "default"
 
         def done_callback(_: asyncio.Task[None]) -> None:
             close_proxy(self._services.pop(model.name))

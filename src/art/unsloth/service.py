@@ -269,7 +269,9 @@ class UnslothService:
         self._lora_id_counter += 1
         return self._lora_id_counter
 
-    async def start_openai_server(self, config: dev.OpenAIServerConfig | None) -> None:
+    async def start_openai_server(
+        self, config: dev.OpenAIServerConfig | None
+    ) -> tuple[str, int]:
         lora_path = get_last_checkpoint_dir(self.output_dir)
         if lora_path is None:
             # Create initial LoRA checkpoint if none exists
@@ -295,6 +297,9 @@ class UnslothService:
             engine=await self.llm,
             config=server_config,
         )
+        return server_config.get("server_args", {}).get(
+            "host"
+        ) or "0.0.0.0", server_config.get("server_args", {}).get("port", 8000)
 
     async def vllm_engine_is_sleeping(self) -> bool:
         return self._is_sleeping
