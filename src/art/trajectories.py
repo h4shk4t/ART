@@ -1,8 +1,8 @@
 import asyncio
-import time
-import traceback
 from contextlib import asynccontextmanager
 from datetime import datetime
+import time
+import traceback
 from typing import (
     Any,
     AsyncGenerator,
@@ -14,8 +14,8 @@ from typing import (
     overload,
 )
 
-import pydantic
 from openai.types.chat.chat_completion import Choice
+import pydantic
 
 from .types import Messages, MessagesAndChoices, Tools
 
@@ -92,9 +92,13 @@ class Trajectory(pydantic.BaseModel):
         for message_or_choice in self.messages_and_choices:
             trainable = isinstance(message_or_choice, Choice)
             message = (
-                message_or_choice.message.to_dict() if trainable else message_or_choice  # ty:ignore[possibly-missing-attribute]
+                message_or_choice.message.to_dict()
+                if trainable
+                else message_or_choice  # ty:ignore[possibly-missing-attribute]
             )
-            loggable_dict["messages"].append({**message, "trainable": trainable})  # ty:ignore[invalid-argument-type, possibly-missing-attribute]
+            loggable_dict["messages"].append(
+                {**message, "trainable": trainable}
+            )  # ty:ignore[invalid-argument-type, possibly-missing-attribute]
         return loggable_dict
 
 
@@ -173,9 +177,9 @@ class TrajectoryGroup(pydantic.BaseModel):
                     + exceptions
                 )
             ],
-            metadata=metadata
-            if metadata is not None
-            else getattr(self, "metadata", {}),
+            metadata=(
+                metadata if metadata is not None else getattr(self, "metadata", {})
+            ),
             metrics=metrics if metrics is not None else getattr(self, "metrics", {}),
             logs=logs if logs is not None else getattr(self, "logs", []),
         )
