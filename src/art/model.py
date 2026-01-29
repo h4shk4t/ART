@@ -467,8 +467,14 @@ class Model(
 
         # 2. Calculate aggregate metrics
         all_metrics: dict[str, list[float]] = {"reward": [], "exception_rate": []}
+        group_metrics: dict[str, list[float]] = {}
 
         for group in trajectory_groups:
+            if group.trajectories:
+                for metric, value in group.metrics.items():
+                    if metric not in group_metrics:
+                        group_metrics[metric] = []
+                    group_metrics[metric].append(float(value))
             for trajectory in group:
                 if isinstance(trajectory, BaseException):
                     all_metrics["exception_rate"].append(1)
@@ -489,6 +495,11 @@ class Model(
         for metric, values in all_metrics.items():
             if len(values) > 0:
                 averages[metric] = sum(values) / len(values)
+
+        # Aggregate group-level metrics once per group
+        for metric, values in group_metrics.items():
+            if len(values) > 0:
+                averages[f"group_metric_{metric}"] = sum(values) / len(values)
 
         # Calculate average standard deviation of rewards within groups
         averages["reward_std_dev"] = calculate_step_std_dev(trajectory_groups)

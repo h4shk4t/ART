@@ -610,8 +610,7 @@ class PipelineTrainer(Generic[ScenarioT, ConfigT]):
                 continue
             if not self._is_scalar_metadata(value):
                 continue
-            for trajectory in group.trajectories:
-                trajectory.metadata[f"scenario_{key}"] = value
+            group.metadata[f"scenario_{key}"] = value
 
     def _is_group_stale(self, group: TrajectoryGroup, min_version: int) -> bool:
         group_version = self._group_initial_version(group)
