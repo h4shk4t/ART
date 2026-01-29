@@ -168,7 +168,7 @@ class OpenAICompatibleTinkerServer:
                         message=ChatCompletionMessage(
                             content=openai_message.get("content") or None,
                             role="assistant",
-                            tool_calls=tool_calls,
+                            tool_calls=tool_calls,  # type: ignore
                         ),
                         logprobs=ChoiceLogprobs(
                             content=[
