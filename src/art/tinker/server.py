@@ -40,7 +40,7 @@ class OpenAICompatibleTinkerServer:
         host = self.host or "0.0.0.0"
         port = self.port or get_free_port(host)
         self._task = asyncio.create_task(self._run(host, port))
-        client = AsyncOpenAI(base_url=f"http://{host}:{port}/v1")
+        client = AsyncOpenAI(api_key="default", base_url=f"http://{host}:{port}/v1")
         start = time.time()
         while True:
             timeout = float(os.environ.get("ART_SERVER_TIMEOUT", 300.0))
