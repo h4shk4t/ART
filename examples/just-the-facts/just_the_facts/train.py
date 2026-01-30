@@ -17,24 +17,10 @@ os.environ["WEAVE_LOG_LEVEL"] = "CRITICAL"
 weave.init(project_name="just-the-facts")
 
 
-async def train(
-    model: art.TrainableModel[JustTheFactsConfig], use_skypilot: bool = False
-):
-    if use_skypilot:
-        from art.skypilot.backend import SkyPilotBackend
+async def train(model: art.TrainableModel[JustTheFactsConfig]):
+    from art.local import LocalBackend
 
-        backend = await SkyPilotBackend.initialize_cluster(
-            cluster_name="just-the-facts",
-            gpu="H100-SXM",
-            tail_logs=False,
-            env_path="../../.env",
-            force_restart=True,
-            art_version="../../",
-        )
-    else:
-        from art.local import LocalBackend
-
-        backend = LocalBackend()
+    backend = LocalBackend()
 
     print(f"Pulling latest checkpoint from S3 bucket: `{os.environ['BACKUP_BUCKET']}`")
     await backend._experimental_pull_from_s3(
@@ -99,9 +85,8 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", required=True, help="Name of the model to train")
-    parser.add_argument("--use-skypilot", action="store_true", help="Use Skypilot")
     args = parser.parse_args()
 
     model = models[args.model]
 
-    asyncio.run(train(model=model, use_skypilot=args.use_skypilot))
+    asyncio.run(train(model=model))

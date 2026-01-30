@@ -8,7 +8,7 @@ from tqdm import auto as tqdm
 from art.serverless.client import Client, ExperimentalTrainingConfig
 
 from .. import dev
-from ..backend import Backend
+from ..backend import AnyTrainableModel, Backend
 from ..trajectories import TrajectoryGroup
 from ..types import ServerlessTrainResult, TrainConfig
 
@@ -21,7 +21,7 @@ class ServerlessBackend(Backend):
         self, *, api_key: str | None = None, base_url: str | None = None
     ) -> None:
         client = Client(api_key=api_key, base_url=base_url)
-        super().__init__(base_url=str(client.base_url))
+        self._base_url = str(client.base_url)
         self._client = client
 
     async def close(self) -> None:
@@ -101,7 +101,7 @@ class ServerlessBackend(Backend):
 
     async def _delete_checkpoint_files(
         self,
-        model: "TrainableModel",
+        model: AnyTrainableModel,
         steps_to_keep: list[int],
     ) -> None:
         """Delete checkpoint files, keeping only the specified steps."""
@@ -119,7 +119,7 @@ class ServerlessBackend(Backend):
 
     async def _prepare_backend_for_training(
         self,
-        model: "TrainableModel",
+        model: AnyTrainableModel,
         config: dev.OpenAIServerConfig | None,
     ) -> tuple[str, str]:
         return str(self._base_url), self._client.api_key  # ty:ignore[possibly-missing-attribute]
@@ -129,7 +129,7 @@ class ServerlessBackend(Backend):
 
     async def train(  # type: ignore[override]
         self,
-        model: "TrainableModel",
+        model: AnyTrainableModel,
         trajectory_groups: Iterable[TrajectoryGroup],
         *,
         # Core training parameters
@@ -249,7 +249,7 @@ class ServerlessBackend(Backend):
 
     async def _train_model(
         self,
-        model: "TrainableModel",
+        model: AnyTrainableModel,
         trajectory_groups: list[TrajectoryGroup],
         config: TrainConfig,
         dev_config: dev.TrainConfig,

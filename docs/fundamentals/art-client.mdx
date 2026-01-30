@@ -19,15 +19,6 @@ If you're curious about how ART allows you to run training and inference either 
   Run training and inference on autoscaling GPUs.
 </Card>
 <Card
-  title="SkyPilotBackend"
-  icon="cloud"
-  href="/fundamentals/art-backend#skypilotbackend"
-  horizontal={true}
-  arrow={true}
->
-  Run training and inference on a separate ephemeral machine.
-</Card>
-<Card
   title="LocalBackend"
   icon="laptop-code"
   href="/fundamentals/art-backend#localbackend"
@@ -62,11 +53,6 @@ Once you've initialized your [backend](/fundamentals/art-backend), you can regis
 ```python
 # managed training
 backend = ServerlessBackend()
-
-# remote training
-backend = SkyPilotBackend.initialize_cluster(
-    cluster_name="art", gpu="H100"
-)
 
 # local training
 backend = LocalBackend()

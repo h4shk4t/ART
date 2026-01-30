@@ -3,7 +3,7 @@ import asyncio
 import os
 
 from rollout import ModelConfig, TicTacToeScenario, rollout
-from train import BASE_MODEL, CLUSTER_NAME, MODEL_NAME, PROJECT_NAME
+from train import BASE_MODEL, MODEL_NAME, PROJECT_NAME
 
 import art
 from art.utils.deployment import TogetherDeploymentConfig, deploy_model
@@ -11,12 +11,6 @@ from art.utils.deployment import TogetherDeploymentConfig, deploy_model
 
 async def deploy_step():
     parser = argparse.ArgumentParser(description="Train a model to play Tic-Tac-Toe")
-    parser.add_argument(
-        "--backend",
-        choices=["skypilot", "local"],
-        default="local",
-        help="Backend to use for training (default: local)",
-    )
     parser.add_argument(
         "--step",
         type=int,
@@ -30,20 +24,9 @@ async def deploy_step():
         base_model=BASE_MODEL,
     )
 
-    # Avoid import unnecessary backend dependencies
-    if args.backend == "skypilot":
-        from art.skypilot.backend import SkyPilotBackend
+    from art.local.backend import LocalBackend
 
-        backend = await SkyPilotBackend.initialize_cluster(
-            cluster_name=CLUSTER_NAME,
-            art_version=".",
-            env_path=".env",
-            gpu="H100",
-        )
-    else:
-        from art.local.backend import LocalBackend
-
-        backend = LocalBackend()
+    backend = LocalBackend()
 
     # Pull checkpoint from S3
     checkpoint_path = await backend._experimental_pull_model_checkpoint(

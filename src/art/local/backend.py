@@ -31,7 +31,7 @@ from art.utils.s3 import (
 from mp_actors import close_proxy, move_to_child_process
 
 from .. import dev
-from ..backend import Backend
+from ..backend import AnyTrainableModel, Backend
 from ..model import Model, TrainableModel
 from ..preprocessing.pack import (
     PackedTensors,
@@ -174,7 +174,7 @@ class LocalBackend(Backend):
 
     def _get_packed_tensors(
         self,
-        model: TrainableModel,
+        model: AnyTrainableModel,
         trajectory_groups: list[TrajectoryGroup],
         advantage_balance: float,
         allow_training_without_logprobs: bool,
@@ -238,7 +238,7 @@ class LocalBackend(Backend):
             )
         return packed_tensors
 
-    async def _get_step(self, model: TrainableModel) -> int:
+    async def _get_step(self, model: AnyTrainableModel) -> int:
         return self.__get_step(model)
 
     def __get_step(self, model: Model) -> int:
@@ -250,7 +250,7 @@ class LocalBackend(Backend):
 
     async def _delete_checkpoint_files(
         self,
-        model: TrainableModel,
+        model: AnyTrainableModel,
         steps_to_keep: list[int],
     ) -> None:
         """Delete checkpoint files, keeping only the specified steps."""
@@ -265,7 +265,7 @@ class LocalBackend(Backend):
 
     async def _prepare_backend_for_training(
         self,
-        model: TrainableModel,
+        model: AnyTrainableModel,
         config: dev.OpenAIServerConfig | None = None,
     ) -> tuple[str, str]:
         service = await self._get_service(model)
@@ -368,7 +368,7 @@ class LocalBackend(Backend):
 
     async def train(  # type: ignore[override]
         self,
-        model: TrainableModel,
+        model: AnyTrainableModel,
         trajectory_groups: Iterable[TrajectoryGroup],
         *,
         # Core training parameters

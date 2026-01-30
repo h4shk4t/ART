@@ -18,9 +18,7 @@ load_dotenv()
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="Deploy a model checkpoint using ART & SkyPilot"
-    )
+    parser = argparse.ArgumentParser(description="Deploy a model checkpoint using ART")
 
     parser.add_argument("--project", required=True, help="ART project name")
     parser.add_argument("--model", required=True, help="Name of the model to deploy")

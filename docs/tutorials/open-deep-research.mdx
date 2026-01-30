@@ -40,13 +40,15 @@ Once the repository is cloned, install dependencies. If you haven't already, ins
 
 Then install the project dependencies by running `uv sync`.
 
-### Step 2: Install SkyPilot/RunPod
+### Step 2: Install backend dependencies and provision a GPU
 
-We'll be using `LocalBackend` to manage the GPU that your model will be trained on. In order to provision a GPU for your training run, you'll need to have SkyPilot installed on your machine and provide it with the credentials to spin up machines on at least one infra provider.
+You'll be using `LocalBackend` to manage the GPU that your model will be trained on. Install ART with the backend dependencies:
 
-We recommend using RunPod because of their ease of use, but any infra provider that SkyPilot [supports](https://docs.skypilot.co/en/latest/overview.html#bringing-your-infra) will work.
+```bash
+pip install openpipe-art[backend]
+```
 
-Follow RunPod's **Getting Started** guide [here](https://docs.runpod.io/integrations/skypilot/). You'll have to provide a credit card to use RunPod, but you'll only pay for the time your GPUs are running.
+Make sure you have access to a machine with one or more modern NVIDIA GPUs. This can be your local workstation or a cloud VM. If you're using a cloud provider, launch the GPU instance and run the rest of this tutorial on that machine.
 
 ### Step 3: Set up optional environment variables found in `.env.example`
 
@@ -74,18 +76,13 @@ uv run run_train.py # Run your rl training run. 1+ Day
 
 This is the main GRPO training loop where the model learns to optimize its research strategies based on feedback from the DeepResearch Bench evaluation framework.
 
-The following steps execute when a training run on a new cluster begins:
+The first training run will:
 
-- **Spin up a cluster with 1 or more H200 GPUs.**
-  - This usually takes about 10 minutes, but RunPod occasionally has network throughput issues that can cause the cluster to take up to 30 minutes to spin up.
-- **Register the model with ART.**
-  - This usually takes less than 5 minutes, though it can require up to 30 minutes if RunPod experiences network issues.
-- **Download the model checkpoint.**
-  - Usually takes a few minutes depending on the model size.
-- **Train the model for a specified number of steps.**
-  - Each RL step involves running the research agent on a subset of benchmark questions, and updating the model based on the rewards. We hold out another subset of test set questions to evalutate model progress every 10 steps that we do not train on. Training time depends on the number of steps and the complexity of each research task.
-- **Upload the final model checkpoint.**
-  - This usually takes a few minutes.
+- Register the model with ART.
+- Download the model checkpoint.
+- Start vLLM and the training service on your GPU.
+- Train the model for a specified number of steps.
+- Upload the final model checkpoint (if configured).
 
 ### Step 5: Generate the benchmarks
 
@@ -103,15 +100,9 @@ This script will:
 
 Then run the `display_benchmarks.ipynb` notebook to visualize the results and generate comparison charts.
 
-### Step 6: Shutting down the cluster
+### Step 6: Shutting down your GPU instance
 
-When you're done training and running benchmarks, you can shut down the cluster by running:
-
-```bash
-uv run sky down [cluster-name]
-```
-
-However, since spinning up clusters is a time-intensive process, we recommend keeping clusters alive until you're sure you won't be using them in the near future.
+When you're done training and running benchmarks, shut down your GPU instance through your cloud provider's console or CLI. If you're running locally, you can stop the training process.
 
 ## Training Results
 

@@ -65,36 +65,6 @@ await model.register(backend)
 ... the rest of your code ...
 ```
 
-### Running the server on remote dedicated GPUs
-
-The ART client can also be run locally and connected to a remote server, which ART will automatically provision for you. To use SkyPilot, you'll need to install the optional dependency:
-
-```bash
-pip install openpipe-art[skypilot]
-```
-
-Then you can use SkyPilotBackend in your code:
-
-```python
-from art import TrainableModel, gather_trajectory_groups
-from art.skypilot.backend import SkyPilotBackend
-
-backend = await SkyPilotBackend.initialize_cluster(
-    cluster_name="my-cluster",
-    gpu="H100"
-)
-
-model = TrainableModel(
-    name="agent-001",
-    project="my-agentic-task",
-    base_model="OpenPipe/Qwen3-14B-Instruct",
-)
-
-await model.register(backend)
-
-... the rest of your code ...
-```
-
 To learn more about the ART client and server, see the docs below.
 
 <div className="cards-container">

@@ -67,9 +67,9 @@ To create a new release:
      - Publish the curated release notes
      - Build and publish the package to PyPI
 
-Then follow the SkyPilot or Local Training instructions below.
+Then follow the GPU training instructions below.
 
-### SkyPilot
+### GPU Training (Local or Cloud VM)
 
 Copy the `.env.example` file to `.env` and set the environment variables:
 
@@ -77,21 +77,9 @@ Copy the `.env.example` file to `.env` and set the environment variables:
 cp .env.example .env
 ```
 
-Ensure you have a valid SkyPilot cloud available:
+Make sure you're on a machine with at least one H100 or A100-80GB GPU. Machines equipped with lower-end GPUs may work, but training will be slower.
 
-```bash
-uv run sky check
-```
-
-Launch a cluster:
-
-```bash
-./scripts/launch-cluster.sh # you can pass any sky launch arguments here
-```
-
-Make sure you are on a machine with at least one H100 or A100-80GB GPU. Machines equipped with lower-end GPUs may work, but training will be slower.
-
-You can now SSH into the `art` cluster, using either VSCode or the command line.
+If you're using a cloud VM, you can SSH into the machine using either VSCode or the command line.
 
 ### Connecting via Command Line
 
@@ -145,8 +133,4 @@ If you run into any issues, the training output is set to maximum verbosity. Cop
 
 ### Cleaning Up
 
-When you're done, you can tear down the cluster with:
-
-```bash
-uv run sky down art
-```
+When you're done, shut down your GPU instance (if using a cloud VM) or stop the local training process.

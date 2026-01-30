@@ -1,4 +1,3 @@
-import argparse
 import asyncio
 import os
 import random
@@ -19,32 +18,14 @@ PULL_FROM_S3 = False
 STEP = 50
 DEPLOY_MODEL = False
 GENERATE_BENCHMARKS = False
-DESTROY_AFTER_RUN = False
-
-parser = argparse.ArgumentParser(description="Train a model to play Tic-Tac-Toe")
-parser.add_argument(
-    "--backend",
-    choices=["skypilot", "local"],
-    default="local",
-    help="Backend to use for training (default: local)",
-)
-args = parser.parse_args()
 
 weave.init("tic-tac-toe", global_postprocess_output=strip_logprobs)
 
 
 async def main():
-    # Avoid import unnecessary backend dependencies
-    if args.backend == "skypilot":
-        from art.skypilot.backend import SkyPilotBackend
+    from art.local.backend import LocalBackend
 
-        backend = await SkyPilotBackend.initialize_cluster(
-            cluster_name="art3", art_version=".", env_path=".env", gpu="H100"
-        )
-    else:
-        from art.local.backend import LocalBackend
-
-        backend = LocalBackend()
+    backend = LocalBackend()
 
     model = art.TrainableModel(
         name="llama-8b-007",
@@ -114,9 +95,6 @@ async def main():
         traj = await rollout(lora_model, TicTacToeScenario(step=0))
 
         print(traj)
-
-    if DESTROY_AFTER_RUN:
-        await backend.down()
 
     if GENERATE_BENCHMARKS:
         gpt_4o_mini = art.Model(

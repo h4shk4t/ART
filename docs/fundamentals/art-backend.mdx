@@ -22,15 +22,6 @@ While the backend's training and inference settings are highly configurable, the
   </div>
   <div className="card-wrapper">
     <Card
-      title="SkyPilotBackend"
-      icon="cloud"
-      href="/fundamentals/art-backend#skypilotbackend"
-      horizontal={true}
-      arrow={true}
-    ></Card>
-  </div>
-  <div className="card-wrapper">
-    <Card
       title="LocalBackend"
       icon="laptop-code"
       href="/fundamentals/art-backend#localbackend"
@@ -40,17 +31,14 @@ While the backend's training and inference settings are highly configurable, the
   </div>
 </div>
 
-## Managed, remote, or local training
+## Managed or local training
 
-ART provides three backend classes:
+ART provides two backend classes:
 
 * `ServerlessBackend` - train remotely on autoscaling GPUs
-* `SkyPilotBackend` - train remotely on self-managed infra
 * `LocalBackend` - run your agent and training code on the same machine
 
-If your agent is already set up on a machine equipped with an advanced GPU and you want to run training on the same machine, use `LocalBackend`. If your agent is running on a machine without an advanced GPU (this includes most personal computers and production servers), use `SkyPilotBackend` or `ServerlessBackend` instead. `ServerlessBackend` optimizes speed and cost by autoscaling across managed clusters. `SkyPilotBackend` lets you use your own infra.
-
-All three backend types implement the `art.Backend` class and the client interacts with all three in the exact same way. Under the hood, `SkyPilotBackend` configures a remote machine equipped with a GPU to run `LocalBackend`, and forwards requests from the client to the remote instance. `ServerlessBackend` runs within W&B Training clusters and autoscales GPUs to meet training and inference demand.
+If your agent is already set up on a machine equipped with an advanced GPU and you want to run training on the same machine, use `LocalBackend`. If your agent is running on a machine without an advanced GPU (this includes most personal computers and production servers), use `ServerlessBackend` instead. `ServerlessBackend` optimizes speed and cost by autoscaling across managed clusters.
 
 ### ServerlessBackend
 
@@ -66,59 +54,6 @@ backend = ServerlessBackend(
 ```
 
 As your training job progresses, `ServerlessBackend` automatically saves your LoRA checkpoints as W&B Artifacts and deploys them for production inference on W&B Inference.
-
-### SkyPilotBackend
-
-To use SkyPilotBackend, you'll need to install the optional dependency:
-
-```bash
-pip install openpipe-art[skypilot]
-```
-
-When a `SkyPilotBackend` instance is initialized, it does a few things:
-
-- Provisions a remote machine with an advanced GPU (by default on RunPod)
-- Installs `openpipe-art` and its dependencies
-- Initializes a `LocalBackend` instance with vLLM and a training server (unsloth or torchtune)
-- Registers the `LocalBackend` instance to forward requests to it over http
-
-To initialize a `SkyPilotBackend` instance, follow the code sample below:
-
-```python
-from art.skypilot import SkyPilotBackend
-
-backend = await SkyPilotBackend.initialize_cluster(
-    # name of the cluster in SkyPilot's registry
-    cluster_name="my-cluster",
-    # version of openpipe-art that should be installed on the remote cluster
-    # default to version installed on the client
-    art_version="0.3.12",
-    # path to environment variables (e.g. WANDB_API_KEY) to set on the remote cluster
-    env_path=".env",
-    # the GPU the cluster is equipped with
-    gpu="H100"
-    # alternatively, more complicated requirements can be specified in
-    # the `resources` argument
-)
-```
-
-When a training job is finished, you can shut down a cluster either through code or the CLI.
-
-**Code:**
-
-```python
-backend = await SkyPilotBackend.initialize_cluster(...)
-
-# ...training code...
-
-backend.down()
-```
-
-**CLI:**
-
-```bash
-uv run sky down my-cluster
-```
 
 ### LocalBackend
 
@@ -148,12 +83,6 @@ BACKEND_TYPE = "serverless"
 if BACKEND_TYPE == "serverless":
     from art.serverless.backend import ServerlessBackend
     backend = await ServerlessBackend()
-else if BACKEND_TYPE="remote":
-    from art.skypilot import SkyPilotBackend
-    backend = await SkyPilotBackend.initialize_cluster(
-        cluster_name="my-cluster",
-        gpu="H100"
-    )
 else:
     from art.local import LocalBackend
     backend = LocalBackend()
@@ -182,12 +111,12 @@ To see `LocalBackend` and `ServerlessBackend` in action, try the examples below.
   <div className="card-wrapper">
     <Card
       title="Summarizer"
-      icon="cloud"
+      icon="laptop-code"
       href="/tutorials/summarizer"
       horizontal={true}
       arrow={true}
     >
-      Use SkyPilotBackend to train a SOTA summarizing agent.
+      Use LocalBackend to train a SOTA summarizing agent.
     </Card>
   </div>
 </div>
