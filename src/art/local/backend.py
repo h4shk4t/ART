@@ -2,6 +2,7 @@ import asyncio
 import json
 import math
 import os
+import shutil
 import subprocess
 from types import TracebackType
 from typing import AsyncIterator, Iterable, Literal, cast
@@ -570,20 +571,22 @@ class LocalBackend(Backend):
                 get_model_dir(model=model, art_path=self._path), next_step
             )
 
-            # If the current checkpoint exists, rename it to the next step
+            # If the current checkpoint exists, copy it to the next step
             if os.path.exists(current_checkpoint_dir):
-                os.rename(current_checkpoint_dir, next_checkpoint_dir)
+                shutil.copytree(
+                    current_checkpoint_dir,
+                    next_checkpoint_dir,
+                    dirs_exist_ok=True,
+                )
                 print(
                     f"Advanced step from {current_step} to {next_step} (no training occurred)"
                 )
 
                 try:
-                    # Register the renamed checkpoint as a new LoRA adapter
+                    # Register the copied checkpoint as a new LoRA adapter
                     # so it's available for inference at the new step
-                    from ..unsloth.service import UnslothService
-
-                    if isinstance(service, UnslothService):
-                        await service.register_lora_for_step(
+                    if hasattr(service, "register_lora_for_step"):
+                        await service.register_lora_for_step(  # type: ignore[attr-defined]
                             next_step, next_checkpoint_dir
                         )
                 except ModuleNotFoundError:
