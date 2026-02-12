@@ -255,7 +255,9 @@ def tokenize_trajectory(
                     "via tokenizer.encode(content). This path ignores tool calls."
                 )
             content = message.get("content")
-            assert isinstance(content, str)
+            assert isinstance(content, str), (
+                "Trajectories must have a 'content' field of type str"
+            )
             content_token_ids = tokenizer.encode(
                 content,
                 add_special_tokens=False,
