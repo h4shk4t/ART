@@ -147,17 +147,6 @@ class MegatronService:
         )
         if not added:
             raise RuntimeError(f"Failed to add LoRA adapter for step {step}")
-        added_alias = await llm.add_lora(
-            LoRARequest(
-                lora_name=self.model_name,
-                lora_int_id=self._next_lora_id(),
-                lora_path=checkpoint_dir,
-            )
-        )
-        if not added_alias:
-            raise RuntimeError(
-                f"Failed to add LoRA alias for step {step} at {checkpoint_dir}"
-            )
         self._latest_step = step
 
     async def register_lora_for_step(self, step: int, checkpoint_dir: str) -> None:

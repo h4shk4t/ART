@@ -3,6 +3,7 @@ import json
 import math
 import os
 import shutil
+import socket
 import subprocess
 from types import TracebackType
 from typing import AsyncIterator, Iterable, Literal, cast
@@ -270,26 +271,36 @@ class LocalBackend(Backend):
         model: AnyTrainableModel,
         config: dev.OpenAIServerConfig | None = None,
     ) -> tuple[str, str]:
+        config_dict: dict = dict(config or {})
+        server_args = dict(config_dict.get("server_args", {}))
+
+        # Avoid binding collisions on busy hosts when no explicit port is provided.
+        if "port" not in server_args:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.bind(("", 0))
+                server_args["port"] = s.getsockname()[1]
+        config_dict["server_args"] = server_args
+        resolved_config = cast(dev.OpenAIServerConfig, config_dict)
+
         service = await self._get_service(model)
-        host, port = await service.start_openai_server(config=config)
+        host, port = await service.start_openai_server(config=resolved_config)
 
         base_url = f"http://{host}:{port}/v1"
-        api_key = (config or {}).get("server_args", {}).get(
-            "api_key", None
-        ) or "default"
+        api_key = server_args.get("api_key") or "default"
 
         def done_callback(_: asyncio.Task[None]) -> None:
             close_proxy(self._services.pop(model.name))
 
         asyncio.create_task(
-            self._monitor_openai_server(model.name, base_url, api_key)
+            self._monitor_openai_server(model, base_url, api_key)
         ).add_done_callback(done_callback)
 
         return base_url, api_key
 
     async def _monitor_openai_server(
-        self, model_name: str, base_url: str, api_key: str
+        self, model: AnyTrainableModel, base_url: str, api_key: str
     ) -> None:
+        model_name = model.name
         openai_client = AsyncOpenAI(
             base_url=base_url,
             api_key=api_key,
@@ -324,7 +335,7 @@ class LocalBackend(Backend):
                         try:
                             # Send a health check with a short timeout
                             await openai_client.completions.create(
-                                model=model_name,
+                                model=self._model_inference_name(model),
                                 prompt="Hi",
                                 max_tokens=1,
                                 timeout=float(
