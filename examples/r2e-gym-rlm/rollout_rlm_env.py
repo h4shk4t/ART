@@ -17,10 +17,11 @@ from openai.types.chat.chat_completion import Choice
 from datasets import Dataset
 
 import art
-from r2egym.repo_analysis.execution_log_parser import parse_log_fn, decolor_dict_keys
+import re
 from verifiers.utils.worker_utils import get_free_port
 
 try:
+    import verifiers as vf
     from verifiers.envs.experimental.rlm_env import RLMEnv
 except Exception as e:  # pragma: no cover
     raise ImportError(
@@ -29,7 +30,42 @@ except Exception as e:  # pragma: no cover
 
 
 class PatchedRLMEnv(RLMEnv):
-    """Patch token id None values to avoid response parsing errors."""
+    """Patch token id None values, ensure pip, and run tests before cleanup."""
+
+    async def on_sandbox_ready(self, state, sandbox_id):
+        executor = self._executor
+        cmd = (
+            "bash -lc '"
+            "python -m ensurepip --default-pip 2>/dev/null || "
+            "python -m ensurepip 2>/dev/null || "
+            "true"
+            "'"
+        )
+        try:
+            await executor._execute_sandbox_command(sandbox_id, cmd, timeout=60)
+        except Exception:
+            pass
+
+    @vf.cleanup(priority=10)
+    async def run_tests_before_cleanup(self, state):
+        sandbox_id = state.get("sandbox_id")
+        if not sandbox_id or state.get("error"):
+            return
+        if self.execution_backend != "sandbox":
+            return
+        try:
+            result = await self._executor._execute_sandbox_command(
+                sandbox_id,
+                "bash -lc '/run_tests.sh 2>&1'",
+                timeout=300,
+            )
+            stdout = getattr(result, "stdout", "") or ""
+            stderr = getattr(result, "stderr", "") or ""
+            state["_test_output"] = stdout or stderr
+            state["_test_exit_code"] = getattr(result, "exit_code", None)
+        except Exception as e:
+            state["_test_output"] = ""
+            state["_test_error"] = str(e)
 
     async def add_model_response(self, state, prompt_messages, response):
         try:
@@ -93,7 +129,9 @@ def _build_prompt(task_instruction: str, backend: str) -> str:
         "Bug report:\n\n"
         f"{task_instruction}\n\n"
         f"{location_hint} "
-        "Use call_bash_repl for iterative exploration, and llm_batch for sub-LLM help."
+        "Use call_bash_repl for iterative exploration, and llm_batch for sub-LLM help.\n\n"
+        "Mandatory: call llm_batch at least once before finalizing. "
+        "Start by summarizing the bug report with llm_batch."
     )
 
 
@@ -131,17 +169,39 @@ def _build_messages_and_choices(state: dict) -> list:
     return messages_and_choices
 
 
+def _parse_pytest_log(log: str) -> dict[str, str]:
+    if not log or "short test summary info" not in log:
+        return {}
+    summary = log.split("short test summary info")[1].strip()
+    result = {}
+    for line in summary.split("\n"):
+        if "PASSED" in line:
+            result[".".join(line.split("::")[1:])] = "PASSED"
+        elif "FAILED" in line:
+            result[".".join(line.split("::")[1:]).split(" - ")[0]] = "FAILED"
+        elif "ERROR" in line:
+            try:
+                name = ".".join(line.split("::")[1:])
+            except IndexError:
+                name = line
+            result[name.split(" - ")[0]] = "ERROR"
+    return result
+
+
+def _decolor(d: dict) -> dict:
+    strip = lambda s: re.sub(r"\u001b\[\d+m", "", s)
+    return {strip(k): v for k, v in d.items()}
+
+
 def _compute_reward_from_logs(log_output: str, ds: dict[str, Any]) -> float:
-    repo_name = _get_repo_name(ds)
-    parse = parse_log_fn(repo_name)(log_output)
-    parse = decolor_dict_keys(parse)
+    parse = _decolor(_parse_pytest_log(log_output))
 
     expected_json = ds.get("expected_output_json")
     if not expected_json:
         return 0.0
 
     expected: dict = json.loads(expected_json)
-    expected = decolor_dict_keys(expected)
+    expected = _decolor(expected)
     parse = {k.split(" - ")[0]: parse[k] for k in sorted(parse.keys())}
     expected = {k.split(" - ")[0]: expected[k] for k in sorted(expected.keys())}
 
@@ -189,9 +249,10 @@ async def rollout(
             backend = os.environ.get("RLM_ENV_BACKEND", "local").lower()
             if backend not in {"local", "sandbox"}:
                 raise ValueError(f"Invalid RLM_ENV_BACKEND: {backend}")
-            if backend == "sandbox" and not os.environ.get("PRIME_API_KEY"):
+            interception_url = os.environ.get("RLM_INTERCEPTION_URL")
+            if backend == "sandbox" and not os.environ.get("PRIME_API_KEY") and not interception_url:
                 raise ValueError(
-                    "PRIME_API_KEY is required for RLMEnv sandbox backend"
+                    "PRIME_API_KEY or RLM_INTERCEPTION_URL is required for RLMEnv sandbox backend"
                 )
 
             interception_port = get_free_port()
@@ -200,6 +261,7 @@ async def rollout(
                 repl_language="bash",
                 execution_backend=backend,
                 interception_port=interception_port,
+                interception_url=interception_url,
                 root_prompt_verbosity="heavy",
                 sub_prompt_verbosity="medium",
                 include_sub_llm_in_trajectory=True,
@@ -250,11 +312,17 @@ async def rollout(
                 f"prompt_preview={str(state.get('prompt'))[:200]} "
                 f"raw_prompt_preview={str(state.get('raw_prompt'))[:200]}"
             )
-            # Run tests inside the same sandbox container (only for sandbox backend)
-            if backend == "sandbox" and state.get("rollout_id"):
-                test_output = await env.call_bash_repl("/run_tests.sh", state)
-                reward = _compute_reward_from_logs(test_output, scenario.ds)
-                traj.reward = float(reward)
+            test_output = state.get("_test_output", "")
+            test_exit = state.get("_test_exit_code")
+            test_error = state.get("_test_error")
+            traj.log(
+                f"Test run: exit_code={test_exit} "
+                f"error={test_error} "
+                f"output_len={len(test_output)} "
+                f"output_preview={test_output[:500]}"
+            )
+            if test_output:
+                traj.reward = float(_compute_reward_from_logs(test_output, scenario.ds))
             else:
                 traj.reward = 0.0
 
@@ -264,11 +332,23 @@ async def rollout(
             metrics = state.get("metrics") or {}
             traj.metrics["num_steps"] = len(state.get("trajectory", []))
             traj.metrics["finished"] = bool(state.get("is_completed", False))
-            traj.metrics["num_sub_queries"] = int(metrics.get("sub_llm_call_count", 0))
-            traj.metrics["repl_call_count"] = int(metrics.get("repl_call_count", 0))
-            traj.metrics["root_tool_call_count"] = int(
-                metrics.get("root_tool_call_count", 0)
+            root_tool_calls = state.get("root_tool_calls", {}) or {}
+            llm_batch_calls = int(root_tool_calls.get("llm_batch", 0))
+            traj.metrics["num_sub_queries"] = int(
+                metrics.get(
+                    "sub_llm_call_count",
+                    state.get("sub_llm_call_count", llm_batch_calls),
+                )
             )
+            traj.metrics["repl_call_count"] = int(
+                metrics.get("repl_call_count", state.get("repl_call_count", 0))
+            )
+            traj.metrics["root_tool_call_count"] = int(
+                metrics.get(
+                    "root_tool_call_count", state.get("root_tool_call_count", 0)
+                )
+            )
+            traj.metrics["llm_batch_calls"] = llm_batch_calls
             traj.metrics["is_sandbox_backend"] = backend == "sandbox"
             traj.metrics["fs_has_data"] = bool(state.get("rlm_fs_has_data", False))
 
