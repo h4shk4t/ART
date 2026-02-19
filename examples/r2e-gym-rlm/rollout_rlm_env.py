@@ -34,17 +34,17 @@ class PatchedRLMEnv(RLMEnv):
 
     async def on_sandbox_ready(self, state, sandbox_id):
         executor = self._executor
-        cmd = (
-            "bash -lc '"
-            "python -m ensurepip --default-pip 2>/dev/null || "
-            "python -m ensurepip 2>/dev/null || "
-            "true"
-            "'"
-        )
-        try:
-            await executor._execute_sandbox_command(sandbox_id, cmd, timeout=60)
-        except Exception:
-            pass
+        setup_cmds = [
+            "python -m ensurepip --default-pip 2>/dev/null || python -m ensurepip 2>/dev/null || true",
+            "ln -sf /r2e_tests /testbed/r2e_tests 2>/dev/null || true",
+        ]
+        for cmd in setup_cmds:
+            try:
+                await executor._execute_sandbox_command(
+                    sandbox_id, f"bash -lc '{cmd}'", timeout=60
+                )
+            except Exception:
+                pass
 
     @vf.cleanup(priority=10)
     async def run_tests_before_cleanup(self, state):
@@ -56,7 +56,7 @@ class PatchedRLMEnv(RLMEnv):
         try:
             result = await self._executor._execute_sandbox_command(
                 sandbox_id,
-                "bash -lc '/run_tests.sh 2>&1'",
+                "bash -lc 'cd /testbed && bash run_tests.sh 2>&1'",
                 timeout=300,
             )
             stdout = getattr(result, "stdout", "") or ""
