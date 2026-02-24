@@ -27,10 +27,13 @@ class DockerClient:
     def __init__(self, base_url: str, timeout: float = DEFAULT_TIMEOUT):
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
+        self._headers: dict[str, str] = {}
+        if "ngrok" in self.base_url:
+            self._headers["ngrok-skip-browser-warning"] = "true"
 
     async def health_check(self) -> dict[str, Any]:
         """Check if the Docker service is reachable and Docker is available."""
-        async with httpx.AsyncClient(timeout=10.0) as client:
+        async with httpx.AsyncClient(timeout=10.0, headers=self._headers) as client:
             resp = await client.get(f"{self.base_url}/health")
             resp.raise_for_status()
             return resp.json()
@@ -67,7 +70,9 @@ class DockerClient:
         last_error: Exception | None = None
         for attempt in range(1 + MAX_RETRIES):
             try:
-                async with httpx.AsyncClient(timeout=self.timeout) as client:
+                async with httpx.AsyncClient(
+                    timeout=self.timeout, headers=self._headers
+                ) as client:
                     resp = await client.post(
                         f"{self.base_url}/test", json=payload
                     )

@@ -86,8 +86,14 @@ async def debug_rollout(
         logger.error("Instance %r not in cache. Available: %s", instance_id, list(cache_index.keys())[:10])
         sys.exit(1)
 
-    cache_entry = cache_index[instance_id]
-    cache_src = cache_entry["cache_path"] if isinstance(cache_entry, dict) else cache_entry
+    cache_src = Path(config.repo_cache_dir) / instance_id
+    if not cache_src.exists():
+        stored = cache_index[instance_id]
+        fallback = stored["cache_path"] if isinstance(stored, dict) else stored
+        cache_src = Path(fallback)
+        if not cache_src.exists():
+            logger.error("Cache dir not found at %s", cache_src)
+            sys.exit(1)
 
     # Load dataset entry
     from datasets import load_dataset
@@ -119,7 +125,9 @@ async def debug_rollout(
     model = art.Model(
         name=config.model_name,
         project=config.project,
-        base_model=config.base_model,
+        inference_base_url=config.vllm_url,
+        inference_api_key="dummy",
+        inference_model_name=config.base_model,
     )
 
     traj = art.Trajectory(
@@ -139,11 +147,12 @@ async def debug_rollout(
         config_metadata=config.to_metadata(),
     )
 
-    # Copy repo
+    # Copy repo (skip .venv / .git which have symlinks to Docker-internal paths)
     import tempfile
 
+    _IGNORE = shutil.ignore_patterns(".venv", ".git", "__pycache__", "*.pyc")
     work_dir = Path(tempfile.mkdtemp(prefix="rlm_debug_"))
-    shutil.copytree(cache_src, str(work_dir), dirs_exist_ok=True)
+    shutil.copytree(cache_src, str(work_dir), dirs_exist_ok=True, symlinks=True, ignore=_IGNORE)
     print(f"{DIM}Work dir: {work_dir}{RESET}")
 
     repl = LocalREPL(
@@ -318,9 +327,9 @@ def main() -> None:
     parser.add_argument("--max-steps", type=int, default=15)
     parser.add_argument("--model", default="Qwen/Qwen3-14B")
     parser.add_argument("--model-name", default="r2e-rlm-debug")
-    parser.add_argument("--vllm-url", default="http://localhost:8000/v1")
-    parser.add_argument("--docker-url", default="http://docker-node:8000")
-    parser.add_argument("--cache-dir", default="/data/repo-cache")
+    parser.add_argument("--vllm-url", default="http://localhost:8001/v1")
+    parser.add_argument("--docker-url", default="http://localhost:8000")
+    parser.add_argument("--cache-dir", default="./repo-cache")
     parser.add_argument("--log-dir", default="logs")
     parser.add_argument("--interactive", action="store_true", help="Pause between steps")
     args = parser.parse_args()

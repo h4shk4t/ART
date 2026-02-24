@@ -513,6 +513,57 @@ def _():
 
 
 # ===========================================================================
+# 10. Think block stripping
+# ===========================================================================
+print("\n=== Think Block Stripping ===")
+
+
+@test("_strip_think removes <think> blocks")
+def _():
+    from rollout import _strip_think
+    text = "<think>I should fix the bug</think>Here is the fix."
+    assert _strip_think(text) == "Here is the fix."
+
+
+@test("_strip_think handles multiline think blocks")
+def _():
+    from rollout import _strip_think
+    text = "<think>\nLet me analyze this.\nThe bug is in line 42.\n</think>\nHere is the patch:"
+    result = _strip_think(text)
+    assert "<think>" not in result
+    assert "Here is the patch:" in result
+
+
+@test("_strip_think handles no think blocks")
+def _():
+    from rollout import _strip_think
+    text = "Here is some normal text with no think blocks."
+    assert _strip_think(text) == text
+
+
+@test("_strip_think handles multiple think blocks")
+def _():
+    from rollout import _strip_think
+    text = "<think>first</think>middle<think>second</think>end"
+    assert _strip_think(text) == "middleend"
+
+
+@test("_strip_think handles empty string")
+def _():
+    from rollout import _strip_think
+    assert _strip_think("") == ""
+
+
+@test("_strip_think handles unclosed think tag gracefully")
+def _():
+    from rollout import _strip_think
+    text = "<think>unclosed block\nsome more text"
+    # re.sub with DOTALL won't match unclosed tags, so text passes through
+    result = _strip_think(text)
+    assert result == text
+
+
+# ===========================================================================
 # Summary
 # ===========================================================================
 print(f"\n{'='*60}")

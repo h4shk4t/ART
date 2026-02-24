@@ -34,14 +34,20 @@ def loss_fn(
     )
     weights = shift_tensor(inputs["weights"], 0.0)
     old_logprobs_mask = ~torch.isnan(old_logprobs)
-    probs_corr = torch.corrcoef(
-        torch.stack(
-            [
-                torch.exp(old_logprobs[old_logprobs_mask]),
-                torch.exp(new_logprobs[old_logprobs_mask]),
-            ]
+    valid_count = old_logprobs_mask.sum().item()
+    if valid_count >= 2:
+        probs_corr = torch.corrcoef(
+            torch.stack(
+                [
+                    torch.exp(old_logprobs[old_logprobs_mask]),
+                    torch.exp(new_logprobs[old_logprobs_mask]),
+                ]
+            )
+        )[0, 1]
+    else:
+        probs_corr = torch.tensor(
+            0.0, device=new_logprobs.device, dtype=new_logprobs.dtype
         )
-    )[0, 1]
     # Assume missing old logprobs were sampled under the current policy
     old_logprobs = torch.where(
         torch.isnan(old_logprobs),

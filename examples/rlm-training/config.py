@@ -20,7 +20,7 @@ class ExperimentConfig:
     model_name: str = "r2e-rlm-qwen3-14b"
     project: str = "rlm-training"
     base_model: str = "Qwen/Qwen3-14B"
-    vllm_url: str = "http://localhost:8000/v1"
+    vllm_url: str = "http://localhost:8001/v1"
 
     # -- System prompt --
     # Import and assign a function from prompts.py, e.g.:
@@ -47,12 +47,15 @@ class ExperimentConfig:
     num_epochs: int = 3
     groups_per_step: int = 8
     rollouts_per_group: int = 4
-    max_concurrent: int = 32
+    max_concurrent: int = 16
+    vllm_max_retries: int = 8
+    strip_think_blocks: bool = True
     learning_rate: float = 5e-6
+    tensor_parallel_size: int = 8
 
     # -- Infrastructure --
-    docker_service_url: str = "http://docker-node:8000"
-    repo_cache_dir: str = "/data/repo-cache"
+    docker_service_url: str = "http://localhost:8000"
+    repo_cache_dir: str = "./repo-cache"
 
     # -- Health limits --
     max_child_processes: int = 256

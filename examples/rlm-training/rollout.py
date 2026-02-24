@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import random
 import shutil
 import time
 from dataclasses import dataclass
@@ -44,6 +45,8 @@ class Scenario:
     problem_statement: str
     expected_output_json: str = ""
     test_cmd: str = "bash -lc 'cd /testbed && bash run_tests.sh 2>&1'"
+    test_file_names: list[str] | None = None
+    test_file_codes: list[str] | None = None
     extra: dict[str, Any] | None = None
 
     @classmethod
@@ -51,12 +54,26 @@ class Scenario:
         repo = ds.get("repo_name", "unknown")
         commit = ds.get("commit_hash", "unknown")
         instance_id = f"{repo}__{commit[:12]}"
+
+        test_names: list[str] | None = None
+        test_codes: list[str] | None = None
+        erc_raw = ds.get("execution_result_content", "")
+        if erc_raw:
+            try:
+                erc = json.loads(erc_raw) if isinstance(erc_raw, str) else erc_raw
+                test_names = erc.get("test_file_names")
+                test_codes = erc.get("test_file_codes")
+            except (json.JSONDecodeError, TypeError, AttributeError):
+                pass
+
         return cls(
             instance_id=instance_id,
             docker_image=ds.get("docker_image", ""),
             problem_statement=ds.get("problem_statement", ""),
             expected_output_json=ds.get("expected_output_json", ""),
             test_cmd=ds.get("test_cmd", cls.test_cmd),
+            test_file_names=test_names,
+            test_file_codes=test_codes,
             extra=ds,
         )
 
@@ -92,6 +109,12 @@ def _to_dict(item: Any) -> dict:
     return item
 
 
+def _strip_think(text: str) -> str:
+    """Strip <think>...</think> blocks from Qwen3 output."""
+    import re
+    return re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
+
+
 def _copy_from_cache(instance_id: str, cache_dir: str) -> tuple[Path, Path]:
     """Copy cached repo to a temp rollout directory.
 
@@ -108,12 +131,19 @@ def _copy_from_cache(instance_id: str, cache_dir: str) -> tuple[Path, Path]:
             f"Instance {instance_id!r} not found in cache index at {index_path}"
         )
 
-    src = entry["cache_path"] if isinstance(entry, dict) else entry
-    cache_src = Path(src)
+    cache_src = Path(cache_dir) / instance_id
+    if not cache_src.exists():
+        fallback = entry["cache_path"] if isinstance(entry, dict) else entry
+        cache_src = Path(fallback)
+        if not cache_src.exists():
+            raise FileNotFoundError(
+                f"Cache dir for {instance_id!r} not found at {cache_src}"
+            )
 
     import tempfile
+    _ignore = shutil.ignore_patterns(".venv", ".git", "__pycache__", "*.pyc")
     work_dir = Path(tempfile.mkdtemp(prefix="rlm_rollout_"))
-    shutil.copytree(str(cache_src), str(work_dir), dirs_exist_ok=True)
+    shutil.copytree(str(cache_src), str(work_dir), dirs_exist_ok=True, symlinks=True, ignore=_ignore)
     return work_dir, cache_src
 
 
@@ -194,6 +224,7 @@ async def rollout(
             ]
 
             consecutive_no_code = 0
+            _vllm_dead = False
 
             for step in range(config.max_steps):
                 step_t0 = time.time()
@@ -204,27 +235,80 @@ async def rollout(
                     chars_per_token=config.chars_per_token,
                 )
 
-                try:
-                    async with traj.track_duration("llm_completion"):
-                        client = model.openai_client()
-                        response = await client.chat.completions.create(
-                            model=model.get_inference_name(),
-                            messages=messages_for_api,
-                            temperature=1.0,
-                            max_completion_tokens=config.max_completion_tokens,
-                        )
-                except openai.BadRequestError as e:
-                    logger.warning("API error at step %d: %s", step, e)
-                    traj.messages_and_choices.append({
-                        "role": "user",
-                        "content": "[Context too long — earlier turns were dropped. Please continue.]",
-                    })
+                # #region agent log
+                _dbg_log_path = "/home/colligo/experiments/RLM/.cursor/debug.log"
+                import json as _dj
+                def _dbg(msg, data=None, hid=""):
+                    import time as _t
+                    with open(_dbg_log_path, "a") as _f:
+                        _f.write(_dj.dumps({"timestamp": int(_t.time()*1000), "location": f"rollout.py:step={step}", "message": msg, "data": data or {}, "hypothesisId": hid}) + "\n")
+                # #endregion
+
+                _llm_retries = getattr(config, "vllm_max_retries", 5)
+                # random delay to desync initial burst requests across rollouts
+                if step == 0:
+                    await asyncio.sleep(random.uniform(0.1, 2.0))
+
+                for _llm_attempt in range(_llm_retries):
+                    try:
+                        async with traj.track_duration("llm_completion"):
+                            client = model.openai_client().with_options(max_retries=0, timeout=60.0)
+                            response = await client.chat.completions.create(
+                                model=model.get_inference_name(),
+                                messages=messages_for_api,
+                                temperature=1.0,
+                                max_completion_tokens=config.max_completion_tokens,
+                            )
+                        break
+                    except openai.BadRequestError as e:
+                        logger.warning("API error at step %d: %s", step, e)
+                        traj.messages_and_choices.append({
+                            "role": "user",
+                            "content": "[Context too long — earlier turns were dropped. Please continue.]",
+                        })
+                        response = None
+                        break
+                    except (openai.InternalServerError, openai.APIConnectionError, openai.APITimeoutError) as e:
+                        _err_body = ""
+                        if hasattr(e, "response") and e.response is not None:
+                            try:
+                                _err_body = e.response.text[:500]
+                            except Exception:
+                                _err_body = str(e.response.status_code)
+                        # #region agent log
+                        _dbg("vLLM_error_retrying", {"error_type": type(e).__name__, "attempt": _llm_attempt + 1, "max": _llm_retries, "instance_id": scenario.instance_id, "error_body": _err_body}, "H2")
+                        # #endregion
+                        logger.warning("vLLM error at step %d (attempt %d/%d): %s", step, _llm_attempt + 1, _llm_retries, e)
+                        if _llm_attempt < _llm_retries - 1:
+                            backoff = min(15.0, 3.0 * (2 ** _llm_attempt))
+                            jitter = random.uniform(0, 0.3 * backoff)
+                            await asyncio.sleep(backoff + jitter)
+                            continue
+                        logger.error("vLLM exhausted retries at step %d, ending rollout", step)
+                        traj.metrics["finished"] = False
+                        response = None
+                        _vllm_dead = True
+                        break
+                else:
+                    response = None
+
+                if response is None:
+                    if _vllm_dead:
+                        # #region agent log
+                        _dbg("vLLM_dead_breaking", {"step": step, "instance_id": scenario.instance_id}, "H1")
+                        # #endregion
+                        break
                     continue
 
                 choice = response.choices[0]
-                traj.messages_and_choices.append(choice)
-
+                
                 assistant_text = choice.message.content or ""
+                if getattr(config, "strip_think_blocks", True):
+                    assistant_text = _strip_think(assistant_text)
+                    choice.message.content = assistant_text
+                
+                traj.messages_and_choices.append(choice)
+                
                 code = extract_python_code(assistant_text)
 
                 if code is None:
@@ -298,6 +382,19 @@ async def rollout(
                 get_modified_files, work_dir, cache_src
             )
 
+            # Inject R2E-Gym test files into the patch so they exist in /testbed/r2e_tests/
+            if scenario.test_file_names and scenario.test_file_codes:
+                for fname, code in zip(scenario.test_file_names, scenario.test_file_codes):
+                    modified[f"r2e_tests/{fname}"] = code.encode("utf-8")
+
+            # #region agent log
+            def _dbg_reward(msg, data=None, hid=""):
+                import time as _t
+                with open("/home/colligo/experiments/RLM/.cursor/debug.log", "a") as _f:
+                    _f.write(_dj.dumps({"timestamp": int(_t.time()*1000), "location": "rollout.py:reward", "message": msg, "data": data or {}, "hypothesisId": hid}) + "\n")
+            _dbg_reward("reward_input", {"modified_count": len(modified) if modified else 0, "has_reward_fn": bool(config.reward_fn), "instance_id": scenario.instance_id, "has_test_files": bool(scenario.test_file_names), "test_file_names": scenario.test_file_names}, "H3")
+            # #endregion
+
             if modified and config.reward_fn:
                 try:
                     test_result = await docker_client.run_tests(
@@ -310,12 +407,21 @@ async def rollout(
                         test_output,
                         scenario.extra or {},
                     )
+                    # #region agent log
+                    _dbg_reward("reward_computed", {"reward": reward, "exit_code": test_result.get("exit_code"), "test_output_len": len(test_output), "test_output_tail": test_output[-500:] if test_output else "", "expected_json_snippet": str(scenario.extra.get("expected_output_json", ""))[:300] if scenario.extra else ""}, "H3")
+                    # #endregion
                     traj.reward = reward
                     traj.metrics["test_exit_code"] = test_result.get("exit_code", -1)
                 except Exception as e:
                     logger.error("Reward computation failed for %s: %s", scenario.instance_id, e)
+                    # #region agent log
+                    _dbg_reward("reward_exception", {"error": str(e)[:300]}, "H3")
+                    # #endregion
                     traj.reward = 0.0
             else:
+                # #region agent log
+                _dbg_reward("reward_skipped", {"modified_is_none": modified is None, "modified_empty": not modified if modified is not None else True}, "H3")
+                # #endregion
                 traj.reward = 0.0
 
             session.finalize(
