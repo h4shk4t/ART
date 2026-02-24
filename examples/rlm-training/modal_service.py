@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import hashlib
 import io
 import logging
 import tarfile
@@ -41,6 +42,9 @@ service_image = modal.Image.debian_slim(python_version="3.11").pip_install(
     "fastapi[standard]",
     "pydantic",
 )
+
+# Shared volume for passing large scripts (avoids ARG_MAX limit)
+script_vol = modal.Volume.from_name("rlm-test-scripts-vol", create_if_missing=True)
 
 
 # ---------------------------------------------------------------------------
@@ -86,7 +90,6 @@ async def run_test(req: TestRequest):
 
     try:
         # Build a Modal Image from the Docker Hub image.
-        # Modal caches image layers — first pull is ~30-60s, subsequent ~2-3s.
         image = modal.Image.from_registry(
             req.docker_image,
             add_python="3.11",
@@ -110,26 +113,50 @@ async def run_test(req: TestRequest):
         script_lines = ["#!/bin/bash", "set -e", "cd /testbed"]
         for path, content in patch_files.items():
             b64_content = base64.b64encode(content).decode("ascii")
-            # Ensure parent directory exists
             script_lines.append(f"mkdir -p \"$(dirname '{path}')\"")
             script_lines.append(
                 f"echo '{b64_content}' | base64 -d > '{path}'"
             )
-        # Run tests (don't set -e for the test cmd itself — capture exit code)
         script_lines.append("set +e")
         script_lines.append(req.test_cmd)
 
         full_script = "\n".join(script_lines)
+        script_bytes = full_script.encode("utf-8")
 
-        # Create and run a Modal Sandbox
-        sandbox = modal.Sandbox.create(
-            "bash", "-c", full_script,
-            image=image,
-            timeout=req.timeout + 30,  # buffer for setup
-            app=app,
-            cpu=2.0,
-            memory=4096,
-        )
+        # Determine if we need Volume-based transfer (ARG_MAX is 65536)
+        use_volume = len(script_bytes) > 50000  # leave margin
+
+        if use_volume:
+            # Write script to shared Volume, sandbox reads it
+            script_hash = hashlib.sha256(script_bytes).hexdigest()[:16]
+            script_filename = f"run_{script_hash}_{int(time.time()*1000)}.sh"
+
+            # Upload script to volume
+            with script_vol.batch_upload() as batch:
+                batch.put(io.BytesIO(script_bytes), script_filename)
+
+            # Sandbox CMD: read script from volume and execute it
+            sandbox_cmd = f"bash /scripts/{script_filename}"
+
+            sandbox = modal.Sandbox.create(
+                "bash", "-c", sandbox_cmd,
+                image=image,
+                timeout=req.timeout + 30,
+                app=app,
+                cpu=2.0,
+                memory=4096,
+                volumes={"/scripts": script_vol},
+            )
+        else:
+            # Small script — pass directly as CMD argument
+            sandbox = modal.Sandbox.create(
+                "bash", "-c", full_script,
+                image=image,
+                timeout=req.timeout + 30,
+                app=app,
+                cpu=2.0,
+                memory=4096,
+            )
 
         sandbox_id = sandbox.object_id or "unknown"
 
@@ -137,6 +164,12 @@ async def run_test(req: TestRequest):
             sandbox.wait()
         except modal.exception.SandboxTimeoutError:
             elapsed = time.time() - t0
+            # Cleanup volume script if used
+            if use_volume:
+                try:
+                    script_vol.remove_file(script_filename)
+                except Exception:
+                    pass
             return TestResponse(
                 test_output=f"Test execution timed out after {req.timeout}s",
                 exit_code=-1,
@@ -151,6 +184,14 @@ async def run_test(req: TestRequest):
         exit_code = sandbox.returncode
 
         elapsed = time.time() - t0
+
+        # Cleanup volume script
+        if use_volume:
+            try:
+                script_vol.remove_file(script_filename)
+            except Exception:
+                pass
+
         return TestResponse(
             test_output=test_output,
             exit_code=exit_code,

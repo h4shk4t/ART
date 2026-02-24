@@ -4,8 +4,8 @@ export WANDB_MODE=disabled
 export UV_CACHE_DIR=/code/colligo/uv-cache
 export PYTORCH_ALLOC_CONF=expandable_segments:True
 exec uv run python train.py \
-  --experiment-name debug-fix-test \
-  --model-name r2e-rlm-debug-v5 \
+  --experiment-name debug-fix-test-modal \
+  --model-name r2e-rlm-debug-v6 \
   --docker-url https://ashutosh3002--rlm-docker-test-service-fastapi-app.modal.run \
   --max-concurrent 16 \
   --tensor-parallel-size 8 \

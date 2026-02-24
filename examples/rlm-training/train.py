@@ -1,34 +1,32 @@
-"""Main training loop for distributed RLM training with ART LocalBackend.
-
-Uses GRPO to train a model on R2E-Gym bug-fixing tasks. All file operations
-during rollouts are local; only test execution hits the remote Docker service.
+"""Full training entry-point for R2E-based RL.
 
 Usage:
-    cd ART/examples/rlm-training
-    uv run python train.py
-    uv run python train.py --experiment-name "longer_context" --max-steps 25
+    uv run python train.py \
+        --experiment-name my-exp-v1 \
+        --model-name r2e-rlm-qwen3-14b \
+        --docker-url http://localhost:8000 \
+        --max-concurrent 8 \
+        --groups-per-step 4 \
+        --rollouts-per-group 4 \
+        --max-steps 100
 """
 
 from __future__ import annotations
 
 import argparse
 import asyncio
+import collections
 import json
 import logging
 import random
-import signal
-import sys
-import threading
 import time
-from functools import partial
 from pathlib import Path
-
-from datasets import load_dataset
 
 import art
 import art.dev
 from art.local.backend import LocalBackend
 from art.utils.iterate_dataset import iterate_dataset
+from datasets import load_dataset
 
 from config import ExperimentConfig
 from docker_client import DockerClient
@@ -37,6 +35,12 @@ from prompts import r2e_rlm_system_prompt, sub_agent_system_prompt
 from rewards import binary_test_reward, partial_test_reward
 from rollout import Scenario, rollout
 from trajectory_logger import TrajectoryLogger
+
+import signal
+import sys
+import threading
+from functools import partial
+
 
 logging.basicConfig(
     level=logging.INFO,
@@ -127,26 +131,57 @@ async def main() -> None:
         await model.register(backend)
         logger.info("Model registered: %s (base: %s)", config.model_name, config.base_model)
 
-        # --- Load dataset (filtered to cached repos only) ---
-        cache_index_path = Path(config.repo_cache_dir) / "index.json"
-        if cache_index_path.exists():
-            with open(cache_index_path) as f:
-                cache_index = json.load(f)
-        else:
-            cache_index = {}
-            logger.warning("No cache index at %s — rollouts will fail for uncached repos", cache_index_path)
-
+        # --- Load dataset ---
         ds = load_dataset("R2E-Gym/R2E-Gym-Lite", split="train")
         all_scenarios = [Scenario.from_dataset_entry(dict(entry)) for entry in ds]
-        scenarios = [s for s in all_scenarios if s.instance_id in cache_index]
+
+        def load_cached_scenarios(all_scen, cache_dir, dataset_size=None):
+            """Re-read cache index and filter scenarios. Ensures diversity via
+            repo-balanced round-robin sampling."""
+            idx_path = Path(cache_dir) / "index.json"
+            if idx_path.exists():
+                with open(idx_path) as f:
+                    cidx = json.load(f)
+            else:
+                return []
+            cached = [s for s in all_scen if s.instance_id in cidx]
+            if not cached:
+                return []
+
+            # Group by repo for balanced sampling
+            by_repo = collections.defaultdict(list)
+            for s in cached:
+                repo = s.instance_id.split("__")[0]
+                by_repo[repo].append(s)
+
+            # Round-robin across repos for diversity
+            balanced = []
+            repo_iters = {repo: iter(random.sample(entries, len(entries)))
+                         for repo, entries in by_repo.items()}
+            while repo_iters:
+                exhausted = []
+                for repo in list(repo_iters.keys()):
+                    try:
+                        balanced.append(next(repo_iters[repo]))
+                    except StopIteration:
+                        exhausted.append(repo)
+                for r in exhausted:
+                    del repo_iters[r]
+
+            if dataset_size is not None:
+                balanced = balanced[:dataset_size]
+            return balanced
+
+        scenarios = load_cached_scenarios(all_scenarios, config.repo_cache_dir, args.dataset_size)
 
         if not scenarios:
             logger.error("No cached scenarios found! Run cache_repos.py first.")
             return
 
-        if args.dataset_size is not None:
-            scenarios = scenarios[: args.dataset_size]
-        logger.info("Loaded %d scenarios (%d cached out of %d total)", len(scenarios), len(scenarios), len(all_scenarios))
+        repo_counts = collections.Counter(s.instance_id.split('__')[0] for s in scenarios)
+        logger.info("Loaded %d scenarios from %d unique repos (%d total in dataset)",
+                    len(scenarios), len(repo_counts), len(all_scenarios))
+        logger.info("Repo distribution: %s", dict(repo_counts.most_common(10)))
 
         # --- Docker health check ---
         try:
@@ -163,12 +198,25 @@ async def main() -> None:
             logger.info("Resuming from step %d", initial_step)
 
         # --- Training loop ---
+        # Re-check cache each epoch to pick up newly cached repos
+        last_scenario_count = len(scenarios)
         for batch in iterate_dataset(
             scenarios,
             groups_per_step=config.groups_per_step,
             num_epochs=config.num_epochs,
             initial_step=initial_step,
         ):
+            # At start of each epoch, reload cache to pick up new repos
+            if batch.epoch_step == 0 and batch.epoch > 0:
+                new_scenarios = load_cached_scenarios(
+                    all_scenarios, config.repo_cache_dir, args.dataset_size
+                )
+                if len(new_scenarios) > last_scenario_count:
+                    logger.info(
+                        "Epoch %d: cache grew %d → %d scenarios, will take effect next restart",
+                        batch.epoch, last_scenario_count, len(new_scenarios),
+                    )
+                    last_scenario_count = len(new_scenarios)
             step_t0 = time.time()
 
             groups = await art.gather_trajectory_groups(
